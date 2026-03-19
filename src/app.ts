@@ -35,6 +35,7 @@ import {
   getAtomById,
   getAtomColour,
   getAtomLabelSegments,
+  getAromaticRingCycles,
   getBondById,
   getBondColour,
   getConnectedBondIds,
@@ -82,6 +83,13 @@ type InteractionState =
       startClient: Point;
       originalViewport: Viewport;
     }
+  | {
+      kind: "gesture";
+      pointerIds: number[];
+      startDistance: number;
+      startMidpoint: Point;
+      originalViewport: Viewport;
+    }
   | null;
 
 interface ViewBox {
@@ -126,6 +134,8 @@ export class ChemicalEditorApp {
 
   private svgEl!: SVGSVGElement;
 
+  private canvasControlsEl!: HTMLElement;
+
   private emptyEl!: HTMLElement;
 
   private projectInputEl!: HTMLInputElement;
@@ -135,6 +145,8 @@ export class ChemicalEditorApp {
   private resizeObserver!: ResizeObserver;
 
   private textMeasureContext: CanvasRenderingContext2D | null = null;
+
+  private activeTouchPoints = new Map<number, Point>();
 
   constructor(root: HTMLElement) {
     this.root = root;
@@ -156,6 +168,11 @@ export class ChemicalEditorApp {
           <aside class="toolrail" id="toolrail"></aside>
           <section class="stage">
             <div class="canvas-frame">
+              <div class="canvas-controls" id="canvas-controls">
+                <button type="button" class="canvas-control-btn" data-canvas-action="zoom-in">+</button>
+                <button type="button" class="canvas-control-btn" data-canvas-action="zoom-out">-</button>
+                <button type="button" class="canvas-control-btn canvas-control-fit" data-canvas-action="fit">Fit</button>
+              </div>
               <svg id="editor-canvas" class="editor-canvas" xmlns="${SVG_NAMESPACE}"></svg>
               <div class="canvas-empty" id="canvas-empty"></div>
             </div>
@@ -173,6 +190,7 @@ export class ChemicalEditorApp {
     this.sidebarEl = this.root.querySelector<HTMLElement>("#sidebar")!;
     this.statusEl = this.root.querySelector<HTMLElement>("#statusbar")!;
     this.svgEl = this.root.querySelector<SVGSVGElement>("#editor-canvas")!;
+    this.canvasControlsEl = this.root.querySelector<HTMLElement>("#canvas-controls")!;
     this.emptyEl = this.root.querySelector<HTMLElement>("#canvas-empty")!;
     this.projectInputEl = this.root.querySelector<HTMLInputElement>("#project-input")!;
     this.molInputEl = this.root.querySelector<HTMLInputElement>("#mol-input")!;
@@ -205,12 +223,12 @@ export class ChemicalEditorApp {
         return;
       }
       if (button.dataset.themeMode === "conventional") {
-        this.applyTheme({ mode: "conventional" }, "Conventional element colours restored.");
+        this.applyColourChoice({ mode: "conventional" }, "Conventional element colours restored.");
         return;
       }
       const presetId = button.dataset.themePreset;
       if (presetId === "red" || presetId === "green" || presetId === "blue") {
-        this.applyTheme({ mode: "presetMono", presetId }, `Applied ${button.textContent?.trim()}.`);
+        this.applyColourChoice({ mode: "presetMono", presetId }, `Applied ${button.textContent?.trim()}.`);
         return;
       }
       const element = button.dataset.chartElement;
@@ -228,10 +246,22 @@ export class ChemicalEditorApp {
       if (!(target instanceof HTMLInputElement) || target.dataset.themeCustom !== "true") {
         return;
       }
-      this.applyTheme(
+      this.applyColourChoice(
         { mode: "customMono", monoColor: target.value },
         `Applied custom monochrome theme ${target.value.toUpperCase()}.`,
       );
+    });
+
+    this.canvasControlsEl.addEventListener("click", (event) => {
+      const button = this.getClosestButton(event.target);
+      if (!button || button.disabled) {
+        return;
+      }
+      const action = button.dataset.canvasAction;
+      if (!action) {
+        return;
+      }
+      this.handleCanvasControlAction(action);
     });
 
     this.projectInputEl.addEventListener("change", () => {
@@ -255,6 +285,10 @@ export class ChemicalEditorApp {
     });
 
     window.addEventListener("pointerup", (event) => {
+      this.handlePointerUp(event);
+    });
+
+    window.addEventListener("pointercancel", (event) => {
       this.handlePointerUp(event);
     });
 
@@ -354,7 +388,6 @@ export class ChemicalEditorApp {
         ${this.renderToolButton("bond", "Single", isTool("bond", "single"), { preset: "single" })}
         ${this.renderToolButton("bond", "Double", isTool("bond", "double"), { preset: "double" })}
         ${this.renderToolButton("bond", "Triple", isTool("bond", "triple"), { preset: "triple" })}
-        ${this.renderToolButton("bond", "Aromatic", isTool("bond", "aromatic"), { preset: "aromatic" })}
         ${this.renderToolButton("bond", "Wedge", isTool("bond", "wedge"), { preset: "wedge" })}
         ${this.renderToolButton("bond", "Hash", isTool("bond", "hash"), { preset: "hash" })}
       </div>
@@ -396,6 +429,7 @@ export class ChemicalEditorApp {
       <section class="side-section">
         <div class="side-title">Theme Controls</div>
         <div class="theme-panel">
+          <div class="theme-help">Colours apply to the current selection. With nothing selected, they apply to the full drawing.</div>
           ${this.renderSidebarButton("Conventional", {
             themeMode: "conventional",
             active: this.document.themeState.mode === "conventional",
@@ -444,8 +478,8 @@ export class ChemicalEditorApp {
         <div class="shortcut-list">
           <div><kbd>V</kbd> Select</div>
           <div><kbd>1</kbd>/<kbd>2</kbd>/<kbd>3</kbd> Bond orders</div>
-          <div><kbd>A</kbd> Aromatic bond</div>
           <div><kbd>W</kbd>/<kbd>Q</kbd> Wedge / hash</div>
+          <div><kbd>B</kbd> Benzene ring</div>
           <div><kbd>C</kbd>/<kbd>N</kbd>/<kbd>O</kbd> Atom tools</div>
           <div><kbd>T</kbd> Tidy</div>
           <div><kbd>Ctrl/Cmd</kbd> + <kbd>Z</kbd> Undo</div>
@@ -459,15 +493,15 @@ export class ChemicalEditorApp {
     this.statusEl.innerHTML = `
       <div class="status-primary">${this.escapeHtml(this.statusMessage)}</div>
       <div class="status-secondary">${this.escapeHtml(
-        this.pendingBondStartId ? "Bond chain mode active. Click an atom or empty space to continue." : "Zoom with the wheel. Shift-click toggles selection.",
+        this.pendingBondStartId
+          ? "Bond chain mode active. Click an atom or empty space to continue."
+          : "Wheel or pinch to zoom. Two-finger drag pans. Shift-click toggles selection.",
       )}</div>
     `;
   }
 
   private renderCanvas(): void {
-    const rect = this.svgEl.getBoundingClientRect();
-    const width = Math.max(rect.width, 960);
-    const height = Math.max(rect.height, 640);
+    const { width, height } = this.getCanvasSize();
     const viewBox = this.getViewBox(width, height);
 
     this.svgEl.setAttribute("viewBox", `${viewBox.x} ${viewBox.y} ${viewBox.width} ${viewBox.height}`);
@@ -497,6 +531,7 @@ export class ChemicalEditorApp {
         `;
 
     const bondMarkup = this.document.bonds.map((bond) => this.renderBond(bond, exportMode)).join("");
+    const aromaticMarkup = this.renderAromaticRingLayer();
     const atomMarkup = this.document.atoms.map((atom) => this.renderAtom(atom, exportMode)).join("");
     const selectionMarkup = exportMode ? "" : this.renderSelectionLayer();
     const ghostMarkup = exportMode ? "" : this.renderGhostLayer();
@@ -509,6 +544,7 @@ export class ChemicalEditorApp {
     return `
       ${background}
       <g class="bond-layer">${bondMarkup}</g>
+      <g class="aromatic-layer">${aromaticMarkup}</g>
       <g class="atom-layer">${atomMarkup}</g>
       <g class="selection-layer">${selectionMarkup}</g>
       <g class="ghost-layer">${ghostMarkup}</g>
@@ -524,7 +560,7 @@ export class ChemicalEditorApp {
       return "";
     }
     const trimmed = this.getTrimmedBondLine(a1, a2);
-    const bondColor = getBondColour(this.document.themeState);
+    const bondColor = getBondColour(this.document.themeState, bond);
     const selectionLine =
       !exportMode && this.selection.bondIds.has(bond.id)
         ? `<line x1="${trimmed.start.x}" y1="${trimmed.start.y}" x2="${trimmed.end.x}" y2="${trimmed.end.y}" stroke="${SELECTION_COLOUR}" stroke-width="14" stroke-linecap="round" opacity="0.22" />`
@@ -592,10 +628,51 @@ export class ChemicalEditorApp {
       case "triple":
         return `${line(-6.2)}${line(0)}${line(6.2)}`;
       case "aromatic":
-        return `${line(0, "9 6")}`;
+        return `${line(0)}`;
       default:
         return `${line(0)}`;
     }
+  }
+
+  private renderAromaticRingLayer(): string {
+    return getAromaticRingCycles(this.document)
+      .map((atomIds) => {
+        const points = atomIds
+          .map((atomId) => getAtomById(this.document, atomId))
+          .filter((value): value is Atom => Boolean(value));
+        const ringBonds = atomIds
+          .map((atomId, index) =>
+            this.findBondBetweenAtoms(atomId, atomIds[(index + 1) % atomIds.length]),
+          )
+          .filter((value): value is Bond => Boolean(value));
+
+        if (points.length !== atomIds.length || points.length < 5) {
+          return "";
+        }
+
+        const bondColor = getBondColour(this.document.themeState, ringBonds[0]);
+        const center = {
+          x: points.reduce((sum, point) => sum + point.x, 0) / points.length,
+          y: points.reduce((sum, point) => sum + point.y, 0) / points.length,
+        };
+        const edgeInset = points.map((point, index) =>
+          lineDistanceToPoint(point, points[(index + 1) % points.length], center),
+        );
+        const radius = Math.max(14, Math.min(...edgeInset) - 10);
+
+        return `
+          <circle
+            cx="${center.x}"
+            cy="${center.y}"
+            r="${radius}"
+            fill="none"
+            stroke="${bondColor}"
+            stroke-width="3.2"
+            opacity="0.9"
+          />
+        `;
+      })
+      .join("");
   }
 
   private renderAtom(atom: Atom, exportMode: boolean): string {
@@ -609,9 +686,13 @@ export class ChemicalEditorApp {
       !exportMode && this.pendingBondStartId === atom.id
         ? `<circle cx="${atom.x}" cy="${atom.y}" r="22" fill="none" stroke="${GUIDE_COLOUR}" stroke-width="2.6" stroke-dasharray="7 6" />`
         : "";
+    const pendingCore =
+      !exportMode && this.pendingBondStartId === atom.id && !visible
+        ? `<circle cx="${atom.x}" cy="${atom.y}" r="5.5" fill="${GUIDE_COLOUR}" opacity="0.9" />`
+        : "";
 
     if (!visible) {
-      return `${selection}${pending}`;
+      return `${selection}${pending}${pendingCore}`;
     }
 
     const segments = this.layoutAtomLabelSegments(atom);
@@ -857,7 +938,10 @@ export class ChemicalEditorApp {
     data: Record<string, string> = {},
   ): string {
     const attributes = Object.entries(data)
-      .map(([key, value]) => `data-${key}="${value}"`)
+      .map(([key, value]) => {
+        const attribute = key.replace(/[A-Z]/g, (match) => `-${match.toLowerCase()}`);
+        return `data-${attribute}="${value}"`;
+      })
       .join(" ");
     return `
       <button type="button" class="tool-btn ${active ? "is-active" : ""}" data-tool="${tool}" ${attributes}>
@@ -940,7 +1024,23 @@ export class ChemicalEditorApp {
   }
 
   private handlePointerDown(event: PointerEvent): void {
+    if (event.pointerType === "touch") {
+      event.preventDefault();
+    }
     const world = this.clientToWorld(event.clientX, event.clientY);
+    if (event.pointerType === "touch") {
+      this.activeTouchPoints.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      if (this.activeTouchPoints.size === 2) {
+        const gesture = this.createTouchGesture();
+        if (gesture) {
+          this.interaction = gesture;
+          this.statusMessage = "Pinch to zoom and drag with two fingers to pan.";
+          this.renderStatus();
+          return;
+        }
+      }
+    }
+
     const { atomId, bondId } = this.getTargetIds(event.target);
     this.hoverWorld = world;
     this.hoverAtomId = atomId ?? null;
@@ -1048,6 +1148,19 @@ export class ChemicalEditorApp {
   }
 
   private handlePointerMove(event: PointerEvent): void {
+    if (event.pointerType === "touch") {
+      event.preventDefault();
+      this.activeTouchPoints.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    }
+
+    if (this.interaction?.kind === "gesture") {
+      if (!this.activeTouchPoints.has(event.pointerId)) {
+        return;
+      }
+      this.updateTouchGesture();
+      return;
+    }
+
     if (!this.interaction || this.interaction.pointerId !== event.pointerId) {
       return;
     }
@@ -1093,6 +1206,19 @@ export class ChemicalEditorApp {
   }
 
   private handlePointerUp(event: PointerEvent): void {
+    if (event.pointerType === "touch") {
+      event.preventDefault();
+      this.activeTouchPoints.delete(event.pointerId);
+    }
+
+    if (this.interaction?.kind === "gesture") {
+      if (this.activeTouchPoints.size < 2) {
+        this.interaction = null;
+        this.renderCanvas();
+      }
+      return;
+    }
+
     if (!this.interaction || this.interaction.pointerId !== event.pointerId) {
       return;
     }
@@ -1404,7 +1530,26 @@ export class ChemicalEditorApp {
     this.renderCanvas();
   }
 
-  private applyTheme(themeState: ThemeState, status: string): void {
+  private applyColourChoice(themeState: ThemeState, status: string): void {
+    const targets = this.getSelectionColourTargets();
+    if (targets.atomIds.size || targets.bondIds.size) {
+      const displayColor = getMonochromeColour(themeState) ?? undefined;
+      this.mutateDocumentWithHistory((document) => {
+        for (const atom of document.atoms) {
+          if (targets.atomIds.has(atom.id)) {
+            atom.displayColor = displayColor;
+          }
+        }
+        for (const bond of document.bonds) {
+          if (targets.bondIds.has(bond.id)) {
+            bond.displayColor = displayColor;
+          }
+        }
+        touchDocument(document);
+      }, this.getSelectionColourStatus(themeState, status));
+      return;
+    }
+
     this.mutateDocumentWithHistory((document) => {
       document.themeState = themeState;
       touchDocument(document);
@@ -1412,11 +1557,11 @@ export class ChemicalEditorApp {
   }
 
   private fitToDocument(): void {
-    const rect = this.svgEl.getBoundingClientRect();
+    const { width, height } = this.getCanvasSize();
     this.document.viewport = fitViewportToBounds(
       this.document.atoms.length ? this.getDocumentBounds() : null,
-      rect.width || 960,
-      rect.height || 640,
+      width,
+      height,
     );
   }
 
@@ -1455,6 +1600,29 @@ export class ChemicalEditorApp {
       y: worldBefore.y - nextHeight * relativeY,
     };
     this.renderCanvas();
+  }
+
+  private handleCanvasControlAction(action: string): void {
+    const rect = this.svgEl.getBoundingClientRect();
+    const centerX = rect.left + rect.width / 2;
+    const centerY = rect.top + rect.height / 2;
+
+    if (action === "fit") {
+      this.fitToDocument();
+      this.statusMessage = "Viewport fit to structure.";
+      this.renderStatus();
+      this.renderCanvas();
+      return;
+    }
+
+    if (action === "zoom-in") {
+      this.zoomAt(1.14, centerX, centerY);
+      return;
+    }
+
+    if (action === "zoom-out") {
+      this.zoomAt(1 / 1.14, centerX, centerY);
+    }
   }
 
   private undo(): void {
@@ -1587,7 +1755,7 @@ export class ChemicalEditorApp {
   }
 
   private async downloadPng(): Promise<void> {
-    const scene = this.createExportScene();
+    const scene = this.createExportScene(this.getPngExportScale());
     const blob = new Blob([scene.markup], { type: "image/svg+xml;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     try {
@@ -1602,6 +1770,8 @@ export class ChemicalEditorApp {
             reject(new Error("Canvas context unavailable."));
             return;
           }
+          context.imageSmoothingEnabled = true;
+          context.imageSmoothingQuality = "high";
           context.fillStyle = "#FFFFFF";
           context.fillRect(0, 0, canvas.width, canvas.height);
           context.drawImage(image, 0, 0);
@@ -1610,14 +1780,14 @@ export class ChemicalEditorApp {
               reject(new Error("PNG encoding failed."));
               return;
             }
-            resolve(blobResult);
+          resolve(blobResult);
           }, "image/png");
         };
         image.onerror = () => reject(new Error("PNG rendering failed."));
         image.src = url;
       });
       this.downloadBlob(`${this.getSafeDocumentName()}.png`, pngBlob);
-      this.statusMessage = "Exported PNG with the active theme.";
+      this.statusMessage = `Exported high-resolution PNG with the active theme (${scene.width}×${scene.height}).`;
       this.renderStatus();
     } catch (error) {
       this.statusMessage = `PNG export failed: ${this.getErrorMessage(error)}`;
@@ -1627,13 +1797,13 @@ export class ChemicalEditorApp {
     }
   }
 
-  private createExportScene(): ExportScene {
-    const rect = this.svgEl.getBoundingClientRect();
-    const width = Math.max(1, Math.round(rect.width || 1200));
-    const height = Math.max(1, Math.round(rect.height || 800));
-    const viewBox = this.getViewBox(width, height);
+  private createExportScene(scale = 1): ExportScene {
+    const { width: viewportWidth, height: viewportHeight } = this.getCanvasSize();
+    const width = Math.max(1, Math.round(viewportWidth * scale));
+    const height = Math.max(1, Math.round(viewportHeight * scale));
+    const viewBox = this.getViewBox(viewportWidth, viewportHeight);
 
-    if (width <= 0 || height <= 0) {
+    if (viewportWidth <= 0 || viewportHeight <= 0) {
       const emptyMarkup = `<svg xmlns="${SVG_NAMESPACE}" width="1200" height="800" viewBox="-600 -400 1200 800"><rect width="1200" height="800" x="-600" y="-400" fill="#FFFFFF" /></svg>`;
       return { markup: emptyMarkup, width: 1200, height: 800 };
     }
@@ -1652,6 +1822,15 @@ export class ChemicalEditorApp {
       width,
       height,
     };
+  }
+
+  private getPngExportScale(): number {
+    const { width, height } = this.getCanvasSize();
+    const deviceScale =
+      typeof window === "undefined" ? 3 : Math.max(3, Math.ceil((window.devicePixelRatio || 1) * 2));
+    const maxPixels = 24_000_000;
+    const maxScaleByPixels = Math.sqrt(maxPixels / Math.max(1, width * height));
+    return clamp(Math.min(deviceScale, maxScaleByPixels), 2, 4);
   }
 
   private async handleKeydown(event: KeyboardEvent): Promise<void> {
@@ -1714,9 +1893,6 @@ export class ChemicalEditorApp {
       case "3":
         this.tool = { kind: "bond", preset: "triple" };
         break;
-      case "a":
-        this.tool = { kind: "bond", preset: "aromatic" };
-        break;
       case "w":
         this.tool = { kind: "bond", preset: "wedge" };
         break;
@@ -1731,6 +1907,9 @@ export class ChemicalEditorApp {
         break;
       case "o":
         this.tool = { kind: "atom", element: "O" };
+        break;
+      case "b":
+        this.tool = { kind: "ring", templateId: "benzene" };
         break;
       case "t":
         this.mutateDocumentWithHistory((document) => {
@@ -1766,12 +1945,69 @@ export class ChemicalEditorApp {
 
   private clientToWorld(clientX: number, clientY: number): Point {
     const rect = this.svgEl.getBoundingClientRect();
-    const worldWidth = (rect.width || 960) / this.document.viewport.zoom;
-    const worldHeight = (rect.height || 640) / this.document.viewport.zoom;
+    const { width, height } = this.getCanvasSize();
+    const worldWidth = width / this.document.viewport.zoom;
+    const worldHeight = height / this.document.viewport.zoom;
     return {
-      x: this.document.viewport.x + ((clientX - rect.left) / (rect.width || 960)) * worldWidth,
-      y: this.document.viewport.y + ((clientY - rect.top) / (rect.height || 640)) * worldHeight,
+      x: this.document.viewport.x + ((clientX - rect.left) / width) * worldWidth,
+      y: this.document.viewport.y + ((clientY - rect.top) / height) * worldHeight,
     };
+  }
+
+  private createTouchGesture(): Extract<InteractionState, { kind: "gesture" }> | null {
+    if (this.activeTouchPoints.size < 2) {
+      return null;
+    }
+    const [first, second] = Array.from(this.activeTouchPoints.entries()).slice(0, 2);
+    const firstPoint = first[1];
+    const secondPoint = second[1];
+    return {
+      kind: "gesture",
+      pointerIds: [first[0], second[0]],
+      startDistance: Math.hypot(secondPoint.x - firstPoint.x, secondPoint.y - firstPoint.y) || 1,
+      startMidpoint: {
+        x: (firstPoint.x + secondPoint.x) / 2,
+        y: (firstPoint.y + secondPoint.y) / 2,
+      },
+      originalViewport: { ...this.document.viewport },
+    };
+  }
+
+  private updateTouchGesture(): void {
+    if (this.interaction?.kind !== "gesture") {
+      return;
+    }
+    const points = this.interaction.pointerIds
+      .map((pointerId) => this.activeTouchPoints.get(pointerId))
+      .filter((value): value is Point => Boolean(value));
+    if (points.length !== 2) {
+      return;
+    }
+
+    const currentDistance = Math.hypot(points[1].x - points[0].x, points[1].y - points[0].y) || 1;
+    const currentMidpoint = {
+      x: (points[0].x + points[1].x) / 2,
+      y: (points[0].y + points[1].y) / 2,
+    };
+    const rect = this.svgEl.getBoundingClientRect();
+    const scaleFactor = currentDistance / this.interaction.startDistance;
+    const nextZoom = clamp(this.interaction.originalViewport.zoom * scaleFactor, 0.35, 3.2);
+    const worldAnchor = this.clientToWorldWithViewport(
+      this.interaction.startMidpoint.x,
+      this.interaction.startMidpoint.y,
+      this.interaction.originalViewport,
+    );
+    const worldWidth = rect.width / nextZoom;
+    const worldHeight = rect.height / nextZoom;
+    const relativeX = (currentMidpoint.x - rect.left) / rect.width;
+    const relativeY = (currentMidpoint.y - rect.top) / rect.height;
+
+    this.document.viewport = {
+      zoom: nextZoom,
+      x: worldAnchor.x - worldWidth * relativeX,
+      y: worldAnchor.y - worldHeight * relativeY,
+    };
+    this.renderCanvas();
   }
 
   private getTargetIds(target: EventTarget | null): { atomId?: string; bondId?: string } {
@@ -1787,35 +2023,7 @@ export class ChemicalEditorApp {
       return { bondId: bondEl.dataset.bondId };
     }
 
-    if (this.interaction?.kind === "box" || this.tool.kind === "select") {
-      const world = this.hoverWorld;
-      if (world) {
-        const bondId = this.findBondNearPoint(world);
-        if (bondId) {
-          return { bondId };
-        }
-      }
-    }
-
     return {};
-  }
-
-  private findBondNearPoint(point: Point): string | undefined {
-    let closestId: string | undefined;
-    let bestDistance = Infinity;
-    for (const bond of this.document.bonds) {
-      const a1 = getAtomById(this.document, bond.a1);
-      const a2 = getAtomById(this.document, bond.a2);
-      if (!a1 || !a2) {
-        continue;
-      }
-      const d = lineDistanceToPoint(a1, a2, point);
-      if (d < 8 && d < bestDistance) {
-        bestDistance = d;
-        closestId = bond.id;
-      }
-    }
-    return closestId;
   }
 
   private cloneSelection(selection: SelectionState): SelectionState {
@@ -1886,6 +2094,60 @@ export class ChemicalEditorApp {
 
   private getErrorMessage(error: unknown): string {
     return error instanceof Error ? error.message : String(error);
+  }
+
+  private getSelectionColourTargets(): { atomIds: Set<string>; bondIds: Set<string> } {
+    const atomIds = new Set(this.selection.atomIds);
+    const bondIds = new Set(this.selection.bondIds);
+
+    for (const bondId of this.selection.bondIds) {
+      const bond = getBondById(this.document, bondId);
+      if (!bond) {
+        continue;
+      }
+      atomIds.add(bond.a1);
+      atomIds.add(bond.a2);
+    }
+
+    for (const bond of this.document.bonds) {
+      if (atomIds.has(bond.a1) && atomIds.has(bond.a2)) {
+        bondIds.add(bond.id);
+      }
+    }
+
+    return { atomIds, bondIds };
+  }
+
+  private getSelectionColourStatus(themeState: ThemeState, fallback: string): string {
+    if (themeState.mode === "conventional") {
+      return "Restored conventional colours for the selection.";
+    }
+    return fallback.replace("theme", "selection").replace("Applied ", "Applied to selection: ");
+  }
+
+  private findBondBetweenAtoms(a1: string, a2: string): Bond | undefined {
+    return this.document.bonds.find(
+      (entry) => (entry.a1 === a1 && entry.a2 === a2) || (entry.a1 === a2 && entry.a2 === a1),
+    );
+  }
+
+  private clientToWorldWithViewport(clientX: number, clientY: number, viewport: Viewport): Point {
+    const rect = this.svgEl.getBoundingClientRect();
+    const { width, height } = this.getCanvasSize();
+    const worldWidth = width / viewport.zoom;
+    const worldHeight = height / viewport.zoom;
+    return {
+      x: viewport.x + ((clientX - rect.left) / width) * worldWidth,
+      y: viewport.y + ((clientY - rect.top) / height) * worldHeight,
+    };
+  }
+
+  private getCanvasSize(): { width: number; height: number } {
+    const rect = this.svgEl.getBoundingClientRect();
+    return {
+      width: rect.width > 0 ? rect.width : 960,
+      height: rect.height > 0 ? rect.height : 640,
+    };
   }
 
   private escapeHtml(value: string): string {

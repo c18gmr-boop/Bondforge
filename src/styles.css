@@ -143,7 +143,7 @@ select {
 
 .workspace {
   display: grid;
-  grid-template-columns: 184px minmax(0, 1fr) 340px;
+  grid-template-columns: 172px minmax(0, 1fr) 286px;
   gap: 18px;
   min-height: 0;
 }
@@ -175,11 +175,11 @@ select {
 .tool-label,
 .side-title {
   margin-bottom: 10px;
-  font-size: 0.82rem;
+  font-size: 0.74rem;
   font-weight: 800;
-  letter-spacing: 0.12em;
+  letter-spacing: 0.18em;
   text-transform: uppercase;
-  color: var(--ink-2);
+  color: #6f7b92;
 }
 
 .tool-btn {
@@ -216,6 +216,52 @@ select {
     linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(255, 252, 247, 0.94)),
     linear-gradient(180deg, rgba(255, 255, 255, 0.34), rgba(255, 255, 255, 0.14));
   box-shadow: var(--shadow);
+}
+
+.canvas-controls {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  z-index: 4;
+  display: flex;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid rgba(17, 24, 39, 0.1);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.88);
+  box-shadow: 0 12px 28px rgba(35, 44, 72, 0.14);
+  backdrop-filter: blur(16px);
+}
+
+.canvas-control-btn {
+  min-width: 42px;
+  height: 42px;
+  padding: 0 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.94);
+  color: var(--ink-0);
+  font-size: 1rem;
+  font-weight: 760;
+  line-height: 1;
+  cursor: pointer;
+  transition:
+    transform 120ms ease,
+    border-color 120ms ease,
+    box-shadow 120ms ease,
+    background 120ms ease;
+  touch-action: manipulation;
+}
+
+.canvas-control-btn:hover {
+  transform: translateY(-1px);
+  border-color: rgba(14, 165, 233, 0.42);
+  box-shadow: 0 10px 24px rgba(14, 165, 233, 0.12);
+}
+
+.canvas-control-fit {
+  min-width: 64px;
+  font-size: 0.92rem;
 }
 
 .editor-canvas {
@@ -279,20 +325,23 @@ select {
 }
 
 .sidebar {
-  padding: 20px 18px;
+  padding: 16px 14px;
   overflow: auto;
 }
 
 .side-section + .side-section {
-  margin-top: 22px;
+  margin-top: 18px;
 }
 
 .session-card,
 .theme-panel {
-  padding: 16px;
+  padding: 14px;
   border: 1px solid var(--line);
   border-radius: 22px;
-  background: rgba(255, 255, 255, 0.88);
+  background: linear-gradient(180deg, rgba(249, 251, 255, 0.96), rgba(255, 255, 255, 0.92));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.85),
+    0 10px 24px rgba(35, 44, 72, 0.05);
 }
 
 .session-name {
@@ -315,7 +364,13 @@ select {
 
 .theme-panel {
   display: grid;
-  gap: 12px;
+  gap: 10px;
+}
+
+.theme-help {
+  color: var(--ink-2);
+  font-size: 0.84rem;
+  line-height: 1.45;
 }
 
 .swatch-grid {
@@ -324,12 +379,34 @@ select {
   gap: 10px;
 }
 
+.theme-btn,
 .theme-swatch {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 10px;
-  padding: 10px 12px;
+  padding: 9px 11px;
+  min-height: 52px;
   text-align: left;
+  font-size: 0.96rem;
+  font-weight: 720;
+  border-radius: 18px;
+}
+
+.theme-btn {
+  width: 100%;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(241, 247, 255, 0.94));
+}
+
+.theme-swatch {
+  justify-content: flex-start;
+  padding-inline: 12px;
+}
+
+.theme-swatch span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .theme-swatch-chip,
@@ -350,23 +427,40 @@ select {
 .colour-input {
   display: grid;
   gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.72);
   color: var(--ink-1);
   font-weight: 650;
 }
 
 .colour-input input {
   width: 100%;
-  height: 46px;
+  height: 42px;
   border: 1px solid var(--line-strong);
-  border-radius: 14px;
+  border-radius: 12px;
   background: transparent;
+  cursor: pointer;
+}
+
+.colour-input input::-webkit-color-swatch-wrapper {
+  padding: 3px;
+}
+
+.colour-input input::-webkit-color-swatch {
+  border: 0;
+  border-radius: 9px;
 }
 
 .theme-preview {
   overflow: hidden;
   border: 1px solid var(--line);
-  border-radius: 18px;
-  background: #fff;
+  border-radius: 20px;
+  background:
+    radial-gradient(circle at top left, rgba(14, 165, 233, 0.08), transparent 42%),
+    linear-gradient(180deg, rgba(247, 250, 255, 0.92), rgba(255, 255, 255, 0.98));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.92);
 }
 
 .theme-preview svg {
@@ -386,7 +480,7 @@ select {
   grid-template-columns: auto auto 1fr;
   align-items: center;
   gap: 12px;
-  padding: 10px 12px;
+  padding: 8px 10px;
   text-align: left;
 }
 
@@ -412,7 +506,7 @@ select {
   justify-self: end;
   color: var(--ink-2);
   font-family: "SFMono-Regular", "Consolas", monospace;
-  font-size: 0.84rem;
+  font-size: 0.78rem;
 }
 
 .shortcut-list {
@@ -444,7 +538,7 @@ kbd {
 
 @media (max-width: 1280px) {
   .workspace {
-    grid-template-columns: 164px minmax(0, 1fr) 310px;
+    grid-template-columns: 156px minmax(0, 1fr) 258px;
   }
 }
 

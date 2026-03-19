@@ -42,6 +42,7 @@ export interface Atom {
   element: ElementSymbol;
   x: number;
   y: number;
+  displayColor?: string;
   charge?: number;
   isotope?: number;
   explicitHydrogens?: number;
@@ -52,6 +53,7 @@ export interface Bond {
   id: string;
   a1: string;
   a2: string;
+  displayColor?: string;
   order: BondOrder;
   stereo: BondStereo;
 }

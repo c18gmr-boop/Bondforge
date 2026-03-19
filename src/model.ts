@@ -136,6 +136,53 @@ export function getConnectedBondIds(document: ChemicalDocument, atomId: string):
     .map((bond) => bond.id);
 }
 
+export function getAromaticRingCycles(document: ChemicalDocument): string[][] {
+  const adjacency = new Map<string, Set<string>>();
+
+  for (const bond of document.bonds) {
+    if (bond.order !== "aromatic") {
+      continue;
+    }
+    const a1 = adjacency.get(bond.a1) ?? new Set<string>();
+    const a2 = adjacency.get(bond.a2) ?? new Set<string>();
+    a1.add(bond.a2);
+    a2.add(bond.a1);
+    adjacency.set(bond.a1, a1);
+    adjacency.set(bond.a2, a2);
+  }
+
+  const cycles = new Map<string, string[]>();
+
+  const visit = (start: string, current: string, path: string[], visited: Set<string>): void => {
+    if (path.length === 6) {
+      if (adjacency.get(current)?.has(start)) {
+        const key = [...path].sort().join("|");
+        if (!cycles.has(key)) {
+          cycles.set(key, [...path]);
+        }
+      }
+      return;
+    }
+
+    for (const next of adjacency.get(current) ?? []) {
+      if (next === start || visited.has(next)) {
+        continue;
+      }
+      visited.add(next);
+      path.push(next);
+      visit(start, next, path, visited);
+      path.pop();
+      visited.delete(next);
+    }
+  };
+
+  for (const atomId of adjacency.keys()) {
+    visit(atomId, atomId, [atomId], new Set([atomId]));
+  }
+
+  return Array.from(cycles.values());
+}
+
 export function touchDocument(document: ChemicalDocument): void {
   document.metadata.updatedAt = nowIso();
   document.metadata.version += 1;
@@ -152,6 +199,9 @@ export function getMonochromeColour(themeState: ThemeState): string | null {
 }
 
 export function getAtomColour(atom: Atom, themeState: ThemeState): string {
+  if (atom.displayColor) {
+    return atom.displayColor;
+  }
   const mono = getMonochromeColour(themeState);
   if (mono) {
     return mono;
@@ -159,7 +209,10 @@ export function getAtomColour(atom: Atom, themeState: ThemeState): string {
   return ELEMENT_COLOUR_MAP.get(atom.element) ?? ELEMENT_COLOUR_MAP.get("*") ?? "#555555";
 }
 
-export function getBondColour(themeState: ThemeState): string {
+export function getBondColour(themeState: ThemeState, bond?: Bond): string {
+  if (bond?.displayColor) {
+    return bond.displayColor;
+  }
   return getMonochromeColour(themeState) ?? NEUTRAL_BOND_COLOUR;
 }
 
@@ -708,6 +761,7 @@ export function normalizeLoadedDocument(raw: unknown): ChemicalDocument {
       element: toStringValue(entry.element, "C"),
       x: toNumberValue(entry.x, 0),
       y: toNumberValue(entry.y, 0),
+      displayColor: typeof entry.displayColor === "string" ? entry.displayColor : undefined,
       charge:
         typeof entry.charge === "number" && Number.isFinite(entry.charge) ? entry.charge : undefined,
       isotope:
@@ -744,6 +798,7 @@ export function normalizeLoadedDocument(raw: unknown): ChemicalDocument {
         id: toStringValue(entry.id, createId()),
         a1: toStringValue(entry.a1, ""),
         a2: toStringValue(entry.a2, ""),
+        displayColor: typeof entry.displayColor === "string" ? entry.displayColor : undefined,
         order,
         stereo,
       };
