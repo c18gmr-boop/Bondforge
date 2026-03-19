@@ -863,7 +863,7 @@ export class ChemicalEditorApp {
     }
     const first = segments[0];
     const last = segments[segments.length - 1];
-    return Math.max(10, Math.min(28, (last.x + last.width - first.x) / 2 + 8));
+    return Math.max(8, Math.min(24, (last.x + last.width - first.x) / 2 + 5));
   }
 
   private layoutAtomLabelSegments(
