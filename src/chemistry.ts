@@ -70,6 +70,9 @@ async function documentToMolecule(
     if (atom.isotope) {
       molecule.setAtomMass(atomIndex, atom.isotope);
     }
+    if (atom.radical) {
+      molecule.setAtomRadical(atomIndex, Molecule.cAtomRadicalStateD);
+    }
     atomIndexById.set(atom.id, atomIndex);
   }
 
@@ -107,6 +110,7 @@ function moleculeToDocument(
       x: molecule.getAtomX(index),
       y: -molecule.getAtomY(index),
       charge: molecule.getAtomCharge(index) || undefined,
+      radical: molecule.getAtomRadical(index) ? true : undefined,
       isotope: molecule.getAtomMass(index) || undefined,
       labelMode: element === "C" ? "auto" : "always",
     });
@@ -181,5 +185,9 @@ export async function exportMolfile(document: ChemicalDocument): Promise<string>
 }
 
 export async function exportSmiles(document: ChemicalDocument): Promise<string> {
-  return (await documentToMolecule(cloneDocument(document))).toSmiles();
+  const sanitized = cloneDocument(document);
+  for (const atom of sanitized.atoms) {
+    atom.radical = undefined;
+  }
+  return (await documentToMolecule(sanitized)).toSmiles();
 }

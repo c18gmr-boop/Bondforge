@@ -21,13 +21,17 @@ import {
 } from "./geometry";
 import type {
   Atom,
+  AtomStateMode,
   Bond,
   BondPreset,
+  BracketAnnotation,
+  BracketShape,
   ChemicalDocument,
   ElementSymbol,
   BondOrder,
   BondStereo,
   Point,
+  Rect,
   RingTemplate,
   RingTemplateId,
   SelectionState,
@@ -38,6 +42,33 @@ export interface AtomLabelSegment {
   text: string;
   element: ElementSymbol;
 }
+
+export interface ValenceViolation {
+  atomId: string;
+  element: ElementSymbol;
+  occupied: number;
+  cap: number;
+}
+
+interface ValenceCaps {
+  neutral: number;
+  positive: number;
+  negative: number;
+  radical: number;
+}
+
+const ORGANIC_VALENCE_CAPS: Record<string, ValenceCaps> = {
+  H: { neutral: 1, positive: 0, negative: 2, radical: 0 },
+  C: { neutral: 4, positive: 3, negative: 3, radical: 3 },
+  N: { neutral: 3, positive: 4, negative: 2, radical: 2 },
+  O: { neutral: 2, positive: 3, negative: 1, radical: 1 },
+  S: { neutral: 2, positive: 3, negative: 1, radical: 1 },
+  P: { neutral: 3, positive: 4, negative: 2, radical: 2 },
+  F: { neutral: 1, positive: 2, negative: 0, radical: 0 },
+  Cl: { neutral: 1, positive: 2, negative: 0, radical: 0 },
+  Br: { neutral: 1, positive: 2, negative: 0, radical: 0 },
+  I: { neutral: 1, positive: 2, negative: 0, radical: 0 },
+};
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -68,6 +99,7 @@ export function createEmptyDocument(name = "Untitled"): ChemicalDocument {
   return {
     atoms: [],
     bonds: [],
+    brackets: [],
     viewport: { ...DEFAULT_VIEWPORT },
     metadata: {
       name,
@@ -113,6 +145,13 @@ export function getAtomById(document: ChemicalDocument, atomId: string): Atom | 
 
 export function getBondById(document: ChemicalDocument, bondId: string): Bond | undefined {
   return document.bonds.find((bond) => bond.id === bondId);
+}
+
+export function getBracketById(
+  document: ChemicalDocument,
+  bracketId: string,
+): BracketAnnotation | undefined {
+  return document.brackets.find((bracket) => bracket.id === bracketId);
 }
 
 export function getBondBetween(
@@ -216,6 +255,27 @@ export function getBondColour(themeState: ThemeState, bond?: Bond): string {
   return getMonochromeColour(themeState) ?? NEUTRAL_BOND_COLOUR;
 }
 
+export function getAtomStateMode(atom: Atom): AtomStateMode {
+  if (atom.radical) {
+    return "radical";
+  }
+  if ((atom.charge ?? 0) > 0) {
+    return "positive";
+  }
+  if ((atom.charge ?? 0) < 0) {
+    return "negative";
+  }
+  return "neutral";
+}
+
+export function getAtomValenceCap(atom: Atom): number {
+  const caps = ORGANIC_VALENCE_CAPS[atom.element];
+  if (!caps) {
+    return Number.POSITIVE_INFINITY;
+  }
+  return caps[getAtomStateMode(atom)];
+}
+
 function bondOrderValue(order: Bond["order"]): number {
   switch (order) {
     case "double":
@@ -229,13 +289,39 @@ function bondOrderValue(order: Bond["order"]): number {
   }
 }
 
-function getAtomBondOrderSum(document: ChemicalDocument, atomId: string): number {
+export function getAtomBondOrderSum(document: ChemicalDocument, atomId: string): number {
   return document.bonds.reduce((sum, bond) => {
     if (bond.a1 !== atomId && bond.a2 !== atomId) {
       return sum;
     }
     return sum + bondOrderValue(bond.order);
   }, 0);
+}
+
+export function getValenceViolation(
+  document: ChemicalDocument,
+  atomIds?: Iterable<string>,
+): ValenceViolation | null {
+  const ids = atomIds ? new Set(atomIds) : new Set(document.atoms.map((atom) => atom.id));
+  for (const atom of document.atoms) {
+    if (!ids.has(atom.id)) {
+      continue;
+    }
+    const cap = getAtomValenceCap(atom);
+    if (!Number.isFinite(cap)) {
+      continue;
+    }
+    const occupied = getAtomBondOrderSum(document, atom.id);
+    if (occupied > cap + 0.001) {
+      return {
+        atomId: atom.id,
+        element: atom.element,
+        occupied,
+        cap,
+      };
+    }
+  }
+  return null;
 }
 
 export function shouldShowAtomLabel(document: ChemicalDocument, atom: Atom): boolean {
@@ -251,6 +337,7 @@ export function shouldShowAtomLabel(document: ChemicalDocument, atom: Atom): boo
   return (
     getAtomDegree(document, atom.id) === 0 ||
     Boolean(atom.charge) ||
+    Boolean(atom.radical) ||
     Boolean(atom.isotope) ||
     Boolean(atom.explicitHydrogens)
   );
@@ -272,7 +359,7 @@ export function getImplicitHydrogenCount(document: ChemicalDocument, atom: Atom)
   if (typeof atom.explicitHydrogens === "number") {
     return atom.explicitHydrogens;
   }
-  if (atom.charge || atom.isotope) {
+  if (atom.charge || atom.radical || atom.isotope) {
     return 0;
   }
 
@@ -377,6 +464,55 @@ export function setAtomElement(
   }
   atom.element = element;
   atom.labelMode = element === "C" ? "auto" : "always";
+  touchDocument(document);
+}
+
+export function setAtomState(
+  document: ChemicalDocument,
+  atomId: string,
+  state: AtomStateMode,
+): void {
+  const atom = getAtomById(document, atomId);
+  if (!atom) {
+    return;
+  }
+  atom.charge = state === "positive" ? 1 : state === "negative" ? -1 : undefined;
+  atom.radical = state === "radical" ? true : undefined;
+  touchDocument(document);
+}
+
+function normalizeBracketRect(rect: Rect): Rect {
+  const x = rect.width >= 0 ? rect.x : rect.x + rect.width;
+  const y = rect.height >= 0 ? rect.y : rect.y + rect.height;
+  return {
+    x,
+    y,
+    width: Math.abs(rect.width),
+    height: Math.abs(rect.height),
+  };
+}
+
+export function addBracket(
+  document: ChemicalDocument,
+  shape: BracketShape,
+  rect: Rect,
+): string {
+  const normalized = normalizeBracketRect(rect);
+  const bracketId = createId();
+  document.brackets.push({
+    id: bracketId,
+    shape,
+    x: normalized.x,
+    y: normalized.y,
+    width: normalized.width,
+    height: normalized.height,
+  });
+  touchDocument(document);
+  return bracketId;
+}
+
+export function deleteBracket(document: ChemicalDocument, bracketId: string): void {
+  document.brackets = document.brackets.filter((bracket) => bracket.id !== bracketId);
   touchDocument(document);
 }
 
@@ -764,6 +900,7 @@ export function normalizeLoadedDocument(raw: unknown): ChemicalDocument {
       displayColor: typeof entry.displayColor === "string" ? entry.displayColor : undefined,
       charge:
         typeof entry.charge === "number" && Number.isFinite(entry.charge) ? entry.charge : undefined,
+      radical: entry.radical === true ? true : undefined,
       isotope:
         typeof entry.isotope === "number" && Number.isFinite(entry.isotope)
           ? entry.isotope
@@ -804,6 +941,28 @@ export function normalizeLoadedDocument(raw: unknown): ChemicalDocument {
       };
     })
     .filter((bond) => atomIds.has(bond.a1) && atomIds.has(bond.a2) && bond.a1 !== bond.a2);
+
+  const bracketsSource = Array.isArray(source.brackets) ? source.brackets : [];
+  document.brackets = bracketsSource
+    .filter((entry): entry is Record<string, unknown> => Boolean(entry) && typeof entry === "object")
+    .map((entry) => {
+      const rawRect = {
+        x: toNumberValue(entry.x, 0),
+        y: toNumberValue(entry.y, 0),
+        width: toNumberValue(entry.width, 0),
+        height: toNumberValue(entry.height, 0),
+      };
+      const normalizedRect = normalizeBracketRect(rawRect);
+      return {
+        id: toStringValue(entry.id, createId()),
+        shape: entry.shape === "round" || entry.shape === "square" ? entry.shape : "square",
+        x: normalizedRect.x,
+        y: normalizedRect.y,
+        width: normalizedRect.width,
+        height: normalizedRect.height,
+      } satisfies BracketAnnotation;
+    })
+    .filter((bracket) => bracket.width > 0 && bracket.height > 0);
 
   const viewportSource =
     source.viewport && typeof source.viewport === "object"

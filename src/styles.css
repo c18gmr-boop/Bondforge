@@ -285,6 +285,64 @@ select {
   display: flex;
 }
 
+.atom-menu {
+  position: fixed;
+  z-index: 40;
+  min-width: 168px;
+}
+
+.atom-menu[hidden] {
+  display: none;
+}
+
+.atom-menu-card {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid rgba(17, 24, 39, 0.12);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 18px 40px rgba(35, 44, 72, 0.2);
+  backdrop-filter: blur(18px);
+}
+
+.atom-menu-title {
+  font-size: 0.82rem;
+  font-weight: 760;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+}
+
+.atom-menu-option {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(246, 249, 255, 0.94));
+  color: var(--ink-0);
+  font-weight: 700;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    transform 120ms ease,
+    border-color 120ms ease,
+    box-shadow 120ms ease,
+    background 120ms ease;
+}
+
+.atom-menu-option:hover {
+  transform: translateY(-1px);
+  border-color: rgba(14, 165, 233, 0.42);
+  box-shadow: 0 10px 24px rgba(14, 165, 233, 0.12);
+}
+
+.atom-menu-option.is-active {
+  background: linear-gradient(180deg, rgba(14, 165, 233, 0.14), rgba(14, 165, 233, 0.06));
+  border-color: rgba(14, 165, 233, 0.48);
+  box-shadow: inset 0 0 0 1px rgba(14, 165, 233, 0.18);
+}
+
 .empty-card {
   max-width: 420px;
   padding: 24px 28px;
@@ -532,6 +590,14 @@ kbd {
 .atom-text {
   font-size: 26px;
   font-weight: 650;
+  letter-spacing: -0.02em;
+  user-select: none;
+}
+
+.bracket-repeat {
+  font-size: 21px;
+  font-weight: 700;
+  font-style: italic;
   letter-spacing: -0.02em;
   user-select: none;
 }

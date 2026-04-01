@@ -15,9 +15,11 @@ export type LabelMode = "auto" | "always" | "hidden";
 export type BondOrder = "single" | "double" | "triple" | "aromatic";
 export type BondStereo = "none" | "wedge" | "hash";
 export type BondPreset = BondOrder | "wedge" | "hash";
+export type AtomStateMode = "neutral" | "positive" | "negative" | "radical";
 export type ThemeMode = "conventional" | "presetMono" | "customMono";
 export type ThemePresetId = "red" | "green" | "blue";
 export type RingTemplateId = "pentane" | "hexane" | "benzene";
+export type BracketShape = "round" | "square";
 
 export interface Point {
   x: number;
@@ -44,6 +46,7 @@ export interface Atom {
   y: number;
   displayColor?: string;
   charge?: number;
+  radical?: boolean;
   isotope?: number;
   explicitHydrogens?: number;
   labelMode: LabelMode;
@@ -64,9 +67,19 @@ export interface ThemeState {
   monoColor?: string;
 }
 
+export interface BracketAnnotation {
+  id: string;
+  shape: BracketShape;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 export interface ChemicalDocument {
   atoms: Atom[];
   bonds: Bond[];
+  brackets: BracketAnnotation[];
   viewport: Viewport;
   metadata: {
     name: string;
@@ -106,6 +119,7 @@ export type ToolState =
   | { kind: "erase" }
   | { kind: "atom"; element: ElementSymbol }
   | { kind: "bond"; preset: BondPreset }
+  | { kind: "bracket"; shape: BracketShape }
   | { kind: "ring"; templateId: RingTemplateId };
 
 export interface ExportScene {

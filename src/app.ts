@@ -20,6 +20,7 @@ import {
 } from "./geometry";
 import {
   addAtom,
+  addBracket,
   addRingFromAtom,
   addRingFromBond,
   addRingFromCenter,
@@ -31,25 +32,33 @@ import {
   createSelectionState,
   deleteAtom,
   deleteBond,
+  deleteBracket,
   deleteSelection,
   getAtomById,
+  getAtomBondOrderSum,
   getAtomColour,
   getAtomLabelSegments,
+  getAtomStateMode,
   getAromaticRingCycles,
   getBondById,
   getBondColour,
   getConnectedBondIds,
   getMonochromeColour,
+  getValenceViolation,
   normalizeLoadedDocument,
   setAtomElement,
+  setAtomState,
   shouldShowAtomLabel,
   tidyDocument,
   touchDocument,
 } from "./model";
 import type {
   Atom,
+  AtomStateMode,
   Bond,
   BondPreset,
+  BracketAnnotation,
+  BracketShape,
   ChemicalDocument,
   ElementSymbol,
   ExportScene,
@@ -82,6 +91,13 @@ type InteractionState =
       pointerId: number;
       startClient: Point;
       originalViewport: Viewport;
+    }
+  | {
+      kind: "bracket";
+      pointerId: number;
+      startWorld: Point;
+      currentWorld: Point;
+      shape: BracketShape;
     }
   | {
       kind: "gesture";
@@ -124,6 +140,8 @@ export class ChemicalEditorApp {
 
   private hoverBondId: string | null = null;
 
+  private hoverBracketId: string | null = null;
+
   private topbarEl!: HTMLElement;
 
   private toolrailEl!: HTMLElement;
@@ -142,11 +160,15 @@ export class ChemicalEditorApp {
 
   private molInputEl!: HTMLInputElement;
 
+  private atomMenuEl!: HTMLElement;
+
   private resizeObserver!: ResizeObserver;
 
   private textMeasureContext: CanvasRenderingContext2D | null = null;
 
   private activeTouchPoints = new Map<number, Point>();
+
+  private atomMenuState: { atomId: string; x: number; y: number } | null = null;
 
   constructor(root: HTMLElement) {
     this.root = root;
@@ -182,6 +204,7 @@ export class ChemicalEditorApp {
         </div>
         <input id="project-input" type="file" accept=".chemjson,application/json" hidden />
         <input id="mol-input" type="file" accept=".mol,.sdf,.txt,text/plain" hidden />
+        <div class="atom-menu" id="atom-menu" hidden></div>
       </div>
     `;
 
@@ -194,6 +217,7 @@ export class ChemicalEditorApp {
     this.emptyEl = this.root.querySelector<HTMLElement>("#canvas-empty")!;
     this.projectInputEl = this.root.querySelector<HTMLInputElement>("#project-input")!;
     this.molInputEl = this.root.querySelector<HTMLInputElement>("#mol-input")!;
+    this.atomMenuEl = this.root.querySelector<HTMLElement>("#atom-menu")!;
   }
 
   private bindEvents(): void {
@@ -272,12 +296,42 @@ export class ChemicalEditorApp {
       void this.importMolFileFromDisk();
     });
 
+    this.atomMenuEl.addEventListener("click", (event) => {
+      const button = this.getClosestButton(event.target);
+      if (!button || !this.atomMenuState) {
+        return;
+      }
+      const nextState = button.dataset.atomState as AtomStateMode | undefined;
+      if (!nextState) {
+        return;
+      }
+      const atomId = this.atomMenuState.atomId;
+      this.closeAtomMenu();
+      const applied = this.mutateDocumentWithHistory(
+        (document) => {
+          setAtomState(document, atomId, nextState);
+        },
+        this.getAtomStateStatus(nextState),
+      );
+      if (!applied) {
+        this.renderCanvas();
+      }
+    });
+
+    this.atomMenuEl.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+    });
+
     this.svgEl.addEventListener("pointerdown", (event) => {
       this.handlePointerDown(event);
     });
 
     this.svgEl.addEventListener("pointermove", (event) => {
       this.updateHoverFromPointer(event);
+    });
+
+    this.svgEl.addEventListener("contextmenu", (event) => {
+      this.handleCanvasContextMenu(event);
     });
 
     window.addEventListener("pointermove", (event) => {
@@ -296,8 +350,24 @@ export class ChemicalEditorApp {
       this.hoverWorld = null;
       this.hoverAtomId = null;
       this.hoverBondId = null;
+      this.hoverBracketId = null;
       this.renderCanvas();
     });
+
+    window.addEventListener(
+      "pointerdown",
+      (event) => {
+        if (!this.atomMenuState) {
+          return;
+        }
+        const target = event.target;
+        if (target instanceof Node && this.atomMenuEl.contains(target)) {
+          return;
+        }
+        this.closeAtomMenu();
+      },
+      true,
+    );
 
     this.svgEl.addEventListener(
       "wheel",
@@ -370,6 +440,9 @@ export class ChemicalEditorApp {
       if (kind === "atom") {
         return this.tool.kind === "atom" && this.tool.element === token;
       }
+      if (kind === "bracket") {
+        return this.tool.kind === "bracket" && this.tool.shape === token;
+      }
       if (kind === "ring") {
         return this.tool.kind === "ring" && this.tool.templateId === token;
       }
@@ -390,6 +463,11 @@ export class ChemicalEditorApp {
         ${this.renderToolButton("bond", "Triple", isTool("bond", "triple"), { preset: "triple" })}
         ${this.renderToolButton("bond", "Wedge", isTool("bond", "wedge"), { preset: "wedge" })}
         ${this.renderToolButton("bond", "Hash", isTool("bond", "hash"), { preset: "hash" })}
+      </div>
+      <div class="tool-group">
+        <div class="tool-label">Brackets</div>
+        ${this.renderToolButton("bracket", "Round", isTool("bracket", "round"), { shape: "round" })}
+        ${this.renderToolButton("bracket", "Square", isTool("bracket", "square"), { shape: "square" })}
       </div>
       <div class="tool-group">
         <div class="tool-label">Atoms</div>
@@ -481,6 +559,7 @@ export class ChemicalEditorApp {
           <div><kbd>W</kbd>/<kbd>Q</kbd> Wedge / hash</div>
           <div><kbd>B</kbd> Benzene ring</div>
           <div><kbd>C</kbd>/<kbd>N</kbd>/<kbd>O</kbd> Atom tools</div>
+          <div><kbd>Right-click</kbd> Atom charge / radical</div>
           <div><kbd>T</kbd> Tidy</div>
           <div><kbd>Ctrl/Cmd</kbd> + <kbd>Z</kbd> Undo</div>
           <div><kbd>Delete</kbd> Remove selection</div>
@@ -495,6 +574,8 @@ export class ChemicalEditorApp {
       <div class="status-secondary">${this.escapeHtml(
         this.pendingBondStartId
           ? "Bond chain mode active. Click an atom or empty space to continue."
+          : this.tool.kind === "bracket"
+            ? "Drag on the canvas to place a paired bracket. Right-click atoms to set charge or radical."
           : "Wheel or pinch to zoom. Two-finger drag pans. Shift-click toggles selection.",
       )}</div>
     `;
@@ -516,6 +597,7 @@ export class ChemicalEditorApp {
           </div>
         `
         : "";
+    this.renderAtomMenu();
   }
 
   private buildSceneMarkup(viewBox: ViewBox, exportMode: boolean): string {
@@ -532,6 +614,9 @@ export class ChemicalEditorApp {
 
     const bondMarkup = this.document.bonds.map((bond) => this.renderBond(bond, exportMode)).join("");
     const aromaticMarkup = this.renderAromaticRingLayer();
+    const bracketMarkup = this.document.brackets
+      .map((bracket) => this.renderBracket(bracket, exportMode))
+      .join("");
     const atomMarkup = this.document.atoms.map((atom) => this.renderAtom(atom, exportMode)).join("");
     const selectionMarkup = exportMode ? "" : this.renderSelectionLayer();
     const ghostMarkup = exportMode ? "" : this.renderGhostLayer();
@@ -545,6 +630,7 @@ export class ChemicalEditorApp {
       ${background}
       <g class="bond-layer">${bondMarkup}</g>
       <g class="aromatic-layer">${aromaticMarkup}</g>
+      <g class="bracket-layer">${bracketMarkup}</g>
       <g class="atom-layer">${atomMarkup}</g>
       <g class="selection-layer">${selectionMarkup}</g>
       <g class="ghost-layer">${ghostMarkup}</g>
@@ -675,6 +761,73 @@ export class ChemicalEditorApp {
       .join("");
   }
 
+  private renderBracket(bracket: BracketAnnotation, exportMode: boolean): string {
+    const bondColor = getBondColour(this.document.themeState);
+    const hoverMarkup =
+      !exportMode && this.hoverBracketId === bracket.id
+        ? this.renderBracketGeometry(bracket, GUIDE_COLOUR, 10, 0.14, false)
+        : "";
+    const bracketMarkup = this.renderBracketGeometry(bracket, bondColor, 3.8, 1, true);
+    return `${hoverMarkup}${bracketMarkup}`;
+  }
+
+  private renderBracketGeometry(
+    bracket: BracketAnnotation,
+    color: string,
+    strokeWidth: number,
+    opacity: number,
+    includeRepeatLabel: boolean,
+  ): string {
+    const paths = this.getBracketPaths(bracket);
+    const pathMarkup = paths
+      .map(
+        (path) => `
+          <path
+            d="${path}"
+            fill="none"
+            stroke="${color}"
+            stroke-width="${strokeWidth}"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            opacity="${opacity}"
+          />
+        `,
+      )
+      .join("");
+
+    const repeatLabel =
+      includeRepeatLabel && bracket.shape === "square"
+        ? `
+            <text
+              x="${bracket.x + bracket.width + 14}"
+              y="${bracket.y + bracket.height + 17}"
+              class="bracket-repeat"
+              fill="${color}"
+              stroke="rgba(255,255,255,0.94)"
+              stroke-width="6"
+              paint-order="stroke"
+            >n</text>
+          `
+        : "";
+
+    return `${pathMarkup}${repeatLabel}`;
+  }
+
+  private getBracketPaths(bracket: BracketAnnotation): string[] {
+    const inset = Math.max(10, Math.min(18, bracket.width * 0.14));
+    if (bracket.shape === "round") {
+      return [
+        `M ${bracket.x + inset} ${bracket.y} Q ${bracket.x} ${bracket.y + bracket.height / 2} ${bracket.x + inset} ${bracket.y + bracket.height}`,
+        `M ${bracket.x + bracket.width - inset} ${bracket.y} Q ${bracket.x + bracket.width} ${bracket.y + bracket.height / 2} ${bracket.x + bracket.width - inset} ${bracket.y + bracket.height}`,
+      ];
+    }
+
+    return [
+      `M ${bracket.x + inset} ${bracket.y} H ${bracket.x} V ${bracket.y + bracket.height} H ${bracket.x + inset}`,
+      `M ${bracket.x + bracket.width - inset} ${bracket.y} H ${bracket.x + bracket.width} V ${bracket.y + bracket.height} H ${bracket.x + bracket.width - inset}`,
+    ];
+  }
+
   private renderAtom(atom: Atom, exportMode: boolean): string {
     const visible = shouldShowAtomLabel(this.document, atom);
     const haloColor = "rgba(255,255,255,0.96)";
@@ -696,6 +849,9 @@ export class ChemicalEditorApp {
     }
 
     const segments = this.layoutAtomLabelSegments(atom);
+    const radicalMarkup = atom.radical
+      ? this.renderRadicalDecoration(atom, segments, haloColor)
+      : "";
     return `
       ${selection}
       ${pending}
@@ -720,7 +876,33 @@ export class ChemicalEditorApp {
             `,
           )
           .join("")}
+        ${radicalMarkup}
       </g>
+    `;
+  }
+
+  private renderRadicalDecoration(
+    atom: Atom,
+    segments: Array<{ x: number; width: number; text: string; color: string }>,
+    haloColor: string,
+  ): string {
+    if (segments.length === 0) {
+      return "";
+    }
+    const last = segments[segments.length - 1];
+    const radicalX = last.x + last.width + 9;
+    const radicalY = atom.y - 15;
+    const color = getAtomColour(atom, this.document.themeState);
+    return `
+      <circle
+        cx="${radicalX}"
+        cy="${radicalY}"
+        r="4.8"
+        fill="${color}"
+        stroke="${haloColor}"
+        stroke-width="5"
+        paint-order="stroke"
+      />
     `;
   }
 
@@ -750,6 +932,38 @@ export class ChemicalEditorApp {
   }
 
   private renderGhostLayer(): string {
+    if (this.interaction?.kind === "bracket") {
+      const rect = normalizeRect(this.interaction.startWorld, this.interaction.currentWorld);
+      if (rect.width < 2 && rect.height < 2) {
+        return "";
+      }
+      return `
+        <rect
+          x="${rect.x}"
+          y="${rect.y}"
+          width="${rect.width}"
+          height="${rect.height}"
+          fill="rgba(14,165,233,0.08)"
+          stroke="rgba(14,165,233,0.18)"
+          stroke-width="1"
+        />
+        ${this.renderBracketGeometry(
+          {
+            id: "preview",
+            shape: this.interaction.shape,
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+          },
+          GUIDE_COLOUR,
+          3,
+          0.88,
+          true,
+        )}
+      `;
+    }
+
     if (this.tool.kind !== "bond" || !this.pendingBondStartId || !this.hoverWorld) {
       return "";
     }
@@ -817,6 +1031,26 @@ export class ChemicalEditorApp {
       })
       .join("");
 
+    const bracketHits = this.document.brackets
+      .map((bracket) =>
+        this.getBracketPaths(bracket)
+          .map(
+            (path) => `
+              <path
+                d="${path}"
+                fill="none"
+                stroke="transparent"
+                stroke-width="18"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                data-bracket-id="${bracket.id}"
+              />
+            `,
+          )
+          .join(""),
+      )
+      .join("");
+
     const atomHits = this.document.atoms
       .map(
         (atom) => `
@@ -831,7 +1065,7 @@ export class ChemicalEditorApp {
       )
       .join("");
 
-    return bondHits + atomHits;
+    return bondHits + bracketHits + atomHits;
   }
 
   private getTrimmedBondLine(a1: Atom, a2: Atom): {
@@ -863,7 +1097,8 @@ export class ChemicalEditorApp {
     }
     const first = segments[0];
     const last = segments[segments.length - 1];
-    return Math.max(8, Math.min(24, (last.x + last.width - first.x) / 2 + 5));
+    const radicalOffset = atom.radical ? 8 : 0;
+    return Math.max(8, Math.min(28, (last.x + last.width - first.x) / 2 + 5 + radicalOffset));
   }
 
   private layoutAtomLabelSegments(
@@ -981,6 +1216,8 @@ export class ChemicalEditorApp {
         return `Bond: ${this.tool.preset}`;
       case "atom":
         return `Atom: ${this.tool.element}`;
+      case "bracket":
+        return `Bracket: ${this.tool.shape}`;
       case "ring":
         return `Ring: ${this.tool.templateId}`;
       case "pan":
@@ -1015,15 +1252,19 @@ export class ChemicalEditorApp {
 
   private updateHoverFromPointer(event: PointerEvent): void {
     this.hoverWorld = this.clientToWorld(event.clientX, event.clientY);
-    const { atomId, bondId } = this.getTargetIds(event.target);
+    const { atomId, bondId, bracketId } = this.getTargetIds(event.target);
     this.hoverAtomId = atomId ?? null;
     this.hoverBondId = bondId ?? null;
+    this.hoverBracketId = bracketId ?? null;
     if (!this.interaction) {
       this.renderCanvas();
     }
   }
 
   private handlePointerDown(event: PointerEvent): void {
+    if (event.pointerType !== "touch" && event.button !== 0) {
+      return;
+    }
     if (event.pointerType === "touch") {
       event.preventDefault();
     }
@@ -1041,10 +1282,11 @@ export class ChemicalEditorApp {
       }
     }
 
-    const { atomId, bondId } = this.getTargetIds(event.target);
+    const { atomId, bondId, bracketId } = this.getTargetIds(event.target);
     this.hoverWorld = world;
     this.hoverAtomId = atomId ?? null;
     this.hoverBondId = bondId ?? null;
+    this.hoverBracketId = bracketId ?? null;
 
     switch (this.tool.kind) {
       case "select":
@@ -1059,13 +1301,23 @@ export class ChemicalEditorApp {
         };
         break;
       case "erase":
-        this.handleErase(atomId, bondId);
+        this.handleErase(atomId, bondId, bracketId);
         break;
       case "atom":
         this.handleAtomPlacement(atomId, world);
         break;
       case "bond":
         this.handleBondPlacement(atomId, bondId, world);
+        break;
+      case "bracket":
+        this.interaction = {
+          kind: "bracket",
+          pointerId: event.pointerId,
+          startWorld: world,
+          currentWorld: world,
+          shape: this.tool.shape,
+        };
+        this.renderCanvas();
         break;
       case "ring":
         this.handleRingPlacement(atomId, bondId, world);
@@ -1179,11 +1431,18 @@ export class ChemicalEditorApp {
 
     const world = this.clientToWorld(event.clientX, event.clientY);
     this.hoverWorld = world;
-    const { atomId, bondId } = this.getTargetIds(event.target);
+    const { atomId, bondId, bracketId } = this.getTargetIds(event.target);
     this.hoverAtomId = atomId ?? null;
     this.hoverBondId = bondId ?? null;
+    this.hoverBracketId = bracketId ?? null;
 
     if (this.interaction.kind === "box") {
+      this.interaction.currentWorld = world;
+      this.renderCanvas();
+      return;
+    }
+
+    if (this.interaction.kind === "bracket") {
       this.interaction.currentWorld = world;
       this.renderCanvas();
       return;
@@ -1256,11 +1515,143 @@ export class ChemicalEditorApp {
       return;
     }
 
+    if (this.interaction.kind === "bracket") {
+      const rect = normalizeRect(this.interaction.startWorld, this.interaction.currentWorld);
+      this.interaction = null;
+      if (rect.width >= 18 && rect.height >= 24) {
+        this.mutateDocumentWithHistory((document) => {
+          addBracket(document, this.tool.kind === "bracket" ? this.tool.shape : "square", rect);
+        }, "Placed bracket annotation.");
+      } else {
+        this.statusMessage = "Bracket placement cancelled.";
+        this.renderStatus();
+        this.renderCanvas();
+      }
+      return;
+    }
+
     this.interaction = null;
     this.renderCanvas();
   }
 
+  private handleCanvasContextMenu(event: MouseEvent): void {
+    event.preventDefault();
+    const atomId = this.getContextMenuAtomId(event.target);
+    if (!atomId) {
+      this.closeAtomMenu();
+      return;
+    }
+    this.openAtomMenu(atomId, event.clientX, event.clientY);
+  }
+
+  private getContextMenuAtomId(target: EventTarget | null): string | null {
+    const { atomId, bondId, bracketId } = this.getTargetIds(target);
+    if (atomId) {
+      return atomId;
+    }
+    if (bondId || bracketId) {
+      return null;
+    }
+    if (this.selection.atomIds.size === 1) {
+      return Array.from(this.selection.atomIds)[0] ?? null;
+    }
+    return null;
+  }
+
+  private openAtomMenu(atomId: string, clientX: number, clientY: number): void {
+    const menuWidth = 180;
+    const menuHeight = 214;
+    this.atomMenuState = {
+      atomId,
+      x: clamp(clientX, 12, window.innerWidth - menuWidth),
+      y: clamp(clientY, 12, window.innerHeight - menuHeight),
+    };
+    this.renderAtomMenu();
+  }
+
+  private closeAtomMenu(): void {
+    this.atomMenuState = null;
+    this.renderAtomMenu();
+  }
+
+  private renderAtomMenu(): void {
+    if (!this.atomMenuState) {
+      this.atomMenuEl.hidden = true;
+      this.atomMenuEl.innerHTML = "";
+      return;
+    }
+
+    const atom = getAtomById(this.document, this.atomMenuState.atomId);
+    if (!atom) {
+      this.atomMenuState = null;
+      this.atomMenuEl.hidden = true;
+      this.atomMenuEl.innerHTML = "";
+      return;
+    }
+
+    const currentState = getAtomStateMode(atom);
+    this.atomMenuEl.hidden = false;
+    this.atomMenuEl.style.left = `${this.atomMenuState.x}px`;
+    this.atomMenuEl.style.top = `${this.atomMenuState.y}px`;
+    this.atomMenuEl.innerHTML = `
+      <div class="atom-menu-card">
+        <div class="atom-menu-title">${this.escapeHtml(atom.element)} atom</div>
+        ${this.renderAtomMenuButton("neutral", "Neutral", currentState === "neutral")}
+        ${this.renderAtomMenuButton("positive", "+", currentState === "positive")}
+        ${this.renderAtomMenuButton("negative", "-", currentState === "negative")}
+        ${this.renderAtomMenuButton("radical", "Radical", currentState === "radical")}
+      </div>
+    `;
+  }
+
+  private renderAtomMenuButton(
+    state: AtomStateMode,
+    label: string,
+    active: boolean,
+  ): string {
+    return `
+      <button
+        type="button"
+        class="atom-menu-option ${active ? "is-active" : ""}"
+        data-atom-state="${state}"
+      >
+        ${label}
+      </button>
+    `;
+  }
+
+  private getAtomStateStatus(state: AtomStateMode): string {
+    switch (state) {
+      case "positive":
+        return "Applied positive charge.";
+      case "negative":
+        return "Applied negative charge.";
+      case "radical":
+        return "Applied radical state.";
+      default:
+        return "Cleared atom state.";
+    }
+  }
+
+  private getSmilesExportOmissionNote(): string {
+    const parts: string[] = [];
+    if (this.document.atoms.some((atom) => atom.radical)) {
+      parts.push("radicals");
+    }
+    if (this.document.brackets.length > 0) {
+      parts.push("bracket annotations");
+    }
+    if (parts.length === 0) {
+      return "";
+    }
+    if (parts.length === 1) {
+      return ` without ${parts[0]}`;
+    }
+    return ` without ${parts[0]} or ${parts[1]}`;
+  }
+
   private async handleTopbarAction(action: string): Promise<void> {
+    this.closeAtomMenu();
     switch (action) {
       case "new":
         this.loadDocument(createEmptyDocument("Untitled Canvas"), {
@@ -1323,6 +1714,7 @@ export class ChemicalEditorApp {
   }
 
   private handleToolSelection(button: HTMLButtonElement): void {
+    this.closeAtomMenu();
     const tool = button.dataset.tool;
     if (!tool) {
       return;
@@ -1342,6 +1734,13 @@ export class ChemicalEditorApp {
       }
       this.tool = { kind: "atom", element };
       this.statusMessage = `${element} atom tool armed.`;
+    } else if (tool === "bracket") {
+      const shape = button.dataset.shape as BracketShape | undefined;
+      if (!shape) {
+        return;
+      }
+      this.tool = { kind: "bracket", shape };
+      this.statusMessage = `${shape} bracket tool armed.`;
     } else if (tool === "ring") {
       const templateId = button.dataset.templateId as RingTemplateId | undefined;
       if (!templateId) {
@@ -1362,7 +1761,7 @@ export class ChemicalEditorApp {
     this.renderCanvas();
   }
 
-  private handleErase(atomId?: string, bondId?: string): void {
+  private handleErase(atomId?: string, bondId?: string, bracketId?: string): void {
     if (atomId) {
       this.mutateDocumentWithHistory((document) => {
         deleteAtom(document, atomId);
@@ -1376,6 +1775,11 @@ export class ChemicalEditorApp {
       }, "Deleted bond.");
       this.selection.bondIds.delete(bondId);
       return;
+    }
+    if (bracketId) {
+      this.mutateDocumentWithHistory((document) => {
+        deleteBracket(document, bracketId);
+      }, "Deleted bracket.");
     }
   }
 
@@ -1439,7 +1843,7 @@ export class ChemicalEditorApp {
     }
 
     let nextAtomId: string | null = atomId ?? null;
-    this.mutateDocumentWithHistory((document) => {
+    const applied = this.mutateDocumentWithHistory((document) => {
       const start = getAtomById(document, this.pendingBondStartId!);
       if (!start) {
         return;
@@ -1450,6 +1854,11 @@ export class ChemicalEditorApp {
       }
       connectAtoms(document, start.id, nextAtomId, preset);
     }, `Added ${preset} bond.`);
+
+    if (!applied || !nextAtomId) {
+      this.renderCanvas();
+      return;
+    }
 
     this.pendingBondStartId = nextAtomId;
     this.renderStatus();
@@ -1483,20 +1892,31 @@ export class ChemicalEditorApp {
   private mutateDocumentWithHistory(
     mutator: (document: ChemicalDocument) => void,
     status: string,
-  ): void {
+  ): boolean {
     const before = cloneDocument(this.document);
     const working = cloneDocument(this.document);
     mutator(working);
+    const touchedAtomIds = this.getValenceRelevantAtomIds(before, working);
+    const violation = touchedAtomIds.length
+      ? getValenceViolation(working, touchedAtomIds)
+      : null;
+    if (violation) {
+      this.statusMessage = this.formatValenceViolation(violation);
+      this.renderStatus();
+      return false;
+    }
     if (this.documentsEqual(before, working)) {
-      return;
+      return false;
     }
     this.history.push(before);
     this.future = [];
     this.document = working;
+    this.closeAtomMenu();
     this.renderChrome();
     this.renderCanvas();
     this.statusMessage = status;
     this.renderStatus();
+    return true;
   }
 
   private commitGesture(originalDoc: ChemicalDocument, status: string): void {
@@ -1522,6 +1942,7 @@ export class ChemicalEditorApp {
     this.selection = createSelectionState();
     this.pendingBondStartId = null;
     this.interaction = null;
+    this.closeAtomMenu();
     if (options.fit) {
       this.fitToDocument();
     }
@@ -1559,18 +1980,86 @@ export class ChemicalEditorApp {
   private fitToDocument(): void {
     const { width, height } = this.getCanvasSize();
     this.document.viewport = fitViewportToBounds(
-      this.document.atoms.length ? this.getDocumentBounds() : null,
+      this.getDocumentBounds(),
       width,
       height,
     );
+    this.relaxViewport(1 / 1.12);
+  }
+
+  private relaxViewport(factor: number): void {
+    const { width, height } = this.getCanvasSize();
+    const centerX = this.document.viewport.x + width / this.document.viewport.zoom / 2;
+    const centerY = this.document.viewport.y + height / this.document.viewport.zoom / 2;
+    const nextZoom = clamp(this.document.viewport.zoom * factor, 0.35, 3.2);
+    this.document.viewport = {
+      zoom: nextZoom,
+      x: centerX - width / nextZoom / 2,
+      y: centerY - height / nextZoom / 2,
+    };
+  }
+
+  private getValenceRelevantAtomIds(
+    before: ChemicalDocument,
+    after: ChemicalDocument,
+  ): string[] {
+    const ids = new Set<string>();
+    const beforeAtomMap = new Map(before.atoms.map((atom) => [atom.id, atom]));
+    const afterAtomMap = new Map(after.atoms.map((atom) => [atom.id, atom]));
+
+    for (const atom of after.atoms) {
+      const previous = beforeAtomMap.get(atom.id);
+      if (!previous) {
+        ids.add(atom.id);
+        continue;
+      }
+      if (
+        previous.element !== atom.element ||
+        previous.charge !== atom.charge ||
+        previous.radical !== atom.radical
+      ) {
+        ids.add(atom.id);
+        continue;
+      }
+      if (Math.abs(getAtomBondOrderSum(before, atom.id) - getAtomBondOrderSum(after, atom.id)) > 0.001) {
+        ids.add(atom.id);
+      }
+    }
+
+    for (const atom of before.atoms) {
+      if (!afterAtomMap.has(atom.id)) {
+        continue;
+      }
+      if (Math.abs(getAtomBondOrderSum(before, atom.id) - getAtomBondOrderSum(after, atom.id)) > 0.001) {
+        ids.add(atom.id);
+      }
+    }
+
+    return Array.from(ids);
+  }
+
+  private formatValenceValue(value: number): string {
+    return Number.isInteger(value) ? `${value}` : value.toFixed(1).replace(/\.0$/, "");
+  }
+
+  private formatValenceViolation(
+    violation: { element: ElementSymbol; occupied: number; cap: number },
+  ): string {
+    return `${violation.element} would exceed its bond limit (${this.formatValenceValue(
+      violation.occupied,
+    )}/${this.formatValenceValue(violation.cap)}).`;
   }
 
   private getDocumentBounds(): { x: number; y: number; width: number; height: number } | null {
-    if (this.document.atoms.length === 0) {
+    if (this.document.atoms.length === 0 && this.document.brackets.length === 0) {
       return null;
     }
     const xs = this.document.atoms.map((atom) => atom.x);
     const ys = this.document.atoms.map((atom) => atom.y);
+    for (const bracket of this.document.brackets) {
+      xs.push(bracket.x - 18, bracket.x + bracket.width + 34);
+      ys.push(bracket.y - 12, bracket.y + bracket.height + 20);
+    }
     const minX = Math.min(...xs);
     const maxX = Math.max(...xs);
     const minY = Math.min(...ys);
@@ -1634,6 +2123,7 @@ export class ChemicalEditorApp {
     this.document = previous;
     this.selection = createSelectionState();
     this.pendingBondStartId = null;
+    this.closeAtomMenu();
     this.statusMessage = "Undo complete.";
     this.renderChrome();
     this.renderCanvas();
@@ -1648,6 +2138,7 @@ export class ChemicalEditorApp {
     this.document = next;
     this.selection = createSelectionState();
     this.pendingBondStartId = null;
+    this.closeAtomMenu();
     this.statusMessage = "Redo complete.";
     this.renderChrome();
     this.renderCanvas();
@@ -1739,7 +2230,8 @@ export class ChemicalEditorApp {
       if (navigator.clipboard?.writeText) {
         void navigator.clipboard.writeText(smiles);
       }
-      this.statusMessage = `Exported SMILES${smiles ? `: ${smiles}` : ""}`;
+      const omissionNote = this.getSmilesExportOmissionNote();
+      this.statusMessage = `Exported SMILES${omissionNote}${smiles ? `: ${smiles}` : ""}`;
       this.renderStatus();
     } catch (error) {
       this.statusMessage = `SMILES export failed: ${this.getErrorMessage(error)}`;
@@ -1863,6 +2355,12 @@ export class ChemicalEditorApp {
       return;
     }
     if (key === "escape") {
+      if (this.atomMenuState) {
+        this.closeAtomMenu();
+        this.statusMessage = "Closed atom menu.";
+        this.renderStatus();
+        return;
+      }
       this.pendingBondStartId = null;
       this.interaction = null;
       this.statusMessage = "Cleared pending interaction.";
@@ -2010,7 +2508,9 @@ export class ChemicalEditorApp {
     this.renderCanvas();
   }
 
-  private getTargetIds(target: EventTarget | null): { atomId?: string; bondId?: string } {
+  private getTargetIds(
+    target: EventTarget | null,
+  ): { atomId?: string; bondId?: string; bracketId?: string } {
     if (!(target instanceof Element)) {
       return {};
     }
@@ -2021,6 +2521,10 @@ export class ChemicalEditorApp {
     const bondEl = target.closest<SVGElement>("[data-bond-id]");
     if (bondEl?.dataset.bondId) {
       return { bondId: bondEl.dataset.bondId };
+    }
+    const bracketEl = target.closest<SVGElement>("[data-bracket-id]");
+    if (bracketEl?.dataset.bracketId) {
+      return { bracketId: bracketEl.dataset.bracketId };
     }
 
     return {};
