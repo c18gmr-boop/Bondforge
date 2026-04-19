@@ -177,7 +177,6 @@ export class ChemicalEditorApp {
     this.renderChrome();
     this.renderCanvas();
     requestAnimationFrame(() => {
-      this.fitToDocument();
       this.renderCanvas();
     });
   }
@@ -1663,8 +1662,8 @@ export class ChemicalEditorApp {
       case "demo":
         this.loadDocument(createDemoDocument(), {
           pushHistory: true,
-          fit: true,
-          status: "Loaded the demo structure.",
+          fit: false,
+          status: "Loaded the default starting document.",
         });
         break;
       case "open":

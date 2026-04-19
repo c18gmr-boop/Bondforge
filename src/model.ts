@@ -19,6 +19,7 @@ import {
   regularPolygonFromEdge,
   snapAngle,
 } from "./geometry";
+import defaultDocumentRaw from "./default-document.json";
 import type {
   Atom,
   AtomStateMode,
@@ -114,29 +115,7 @@ export function createEmptyDocument(name = "Untitled"): ChemicalDocument {
 }
 
 export function createDemoDocument(): ChemicalDocument {
-  const document = createEmptyDocument("Demo Diol");
-  document.atoms = [
-    { id: createId(), element: "O", x: -160, y: -120, labelMode: "always" },
-    { id: createId(), element: "C", x: -92, y: -120, labelMode: "auto" },
-    { id: createId(), element: "C", x: -24, y: 0, labelMode: "auto" },
-    { id: createId(), element: "C", x: -92, y: 120, labelMode: "auto" },
-    { id: createId(), element: "C", x: 92, y: 0, labelMode: "auto" },
-    { id: createId(), element: "C", x: 160, y: 120, labelMode: "auto" },
-    { id: createId(), element: "O", x: 160, y: 214, labelMode: "always" },
-    { id: createId(), element: "C", x: 228, y: 120, labelMode: "auto" },
-  ];
-  const [o1, c1, c2, c3, c4, c5, o2, c6] = document.atoms.map((atom) => atom.id);
-  document.bonds = [
-    { id: createId(), a1: o1, a2: c1, order: "single", stereo: "none" },
-    { id: createId(), a1: c1, a2: c2, order: "single", stereo: "none" },
-    { id: createId(), a1: c2, a2: c3, order: "single", stereo: "none" },
-    { id: createId(), a1: c2, a2: c4, order: "single", stereo: "none" },
-    { id: createId(), a1: c4, a2: c5, order: "single", stereo: "none" },
-    { id: createId(), a1: c5, a2: o2, order: "single", stereo: "none" },
-    { id: createId(), a1: c5, a2: c6, order: "single", stereo: "none" },
-  ];
-  touchDocument(document);
-  return document;
+  return normalizeLoadedDocument(defaultDocumentRaw);
 }
 
 export function getAtomById(document: ChemicalDocument, atomId: string): Atom | undefined {
