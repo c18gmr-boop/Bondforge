@@ -345,14 +345,14 @@ export function getImplicitHydrogenCount(document: ChemicalDocument, atom: Atom)
   const degree = getAtomDegree(document, atom.id);
   const bondOrderSum = getAtomBondOrderSum(document, atom.id);
 
-  if (degree !== 1) {
+  if (degree === 0) {
     return 0;
   }
 
   switch (atom.element) {
     case "O":
     case "S":
-      return bondOrderSum <= 1 ? 1 : 0;
+      return degree === 1 && bondOrderSum <= 1 ? 1 : 0;
     case "N":
     case "P":
       return Math.max(0, Math.min(2, Math.round(3 - bondOrderSum)));
